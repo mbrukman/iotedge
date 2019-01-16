@@ -37,6 +37,9 @@ pub enum ErrorKind {
 
     #[fail(display = "Could not provision device")]
     Provision,
+
+    #[fail(display = "The symmetric key string has a malformed value")]
+    SymmetricKeyMalformed,
 }
 
 impl Fail for Error {

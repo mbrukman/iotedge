@@ -39,4 +39,5 @@ pub use model::{
     DeviceRegistration, DeviceRegistrationResult, RegistrationOperationStatus,
     TpmRegistrationResult,
 };
-pub use registration::{DpsClient, DpsTokenSource};
+
+pub use registration::{DpsAuthKind, DpsClient, DpsTokenSource};

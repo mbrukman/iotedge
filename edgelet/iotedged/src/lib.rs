@@ -106,7 +106,7 @@ use hsm::tpm::Tpm;
 use hsm::ManageTpmKeys;
 use iothubservice::DeviceClient;
 use provisioning::provisioning::{
-    BackupProvisioning, DpsProvisioning, ManualProvisioning, Provision, ProvisioningResult,
+    BackupProvisioning, DpsProvisioning, ManualProvisioning, Provision, ProvisioningResult, DpsSymmetricKeyProvisioning
 };
 
 use settings::{Dps, Manual, Provisioning, Settings, DEFAULT_CONNECTION_STRING};
@@ -619,30 +619,51 @@ where
     HC: 'static + ClientImpl,
     M: ModuleRuntime + Send + 'static,
 {
-    let tpm = Tpm::new().context(ErrorKind::Initialize(
-        InitializeErrorReason::DpsProvisioningClient,
-    ))?;
-    let ek_result = tpm.get_ek().context(ErrorKind::Initialize(
-        InitializeErrorReason::DpsProvisioningClient,
-    ))?;
-    let srk_result = tpm.get_srk().context(ErrorKind::Initialize(
-        InitializeErrorReason::DpsProvisioningClient,
-    ))?;
-    let dps = DpsProvisioning::new(
-        hyper_client,
-        provisioning.global_endpoint().clone(),
-        provisioning.scope_id().to_string(),
-        provisioning.registration_id().to_string(),
-        "2017-11-15".to_string(),
-        ek_result,
-        srk_result,
-    )
-    .context(ErrorKind::Initialize(
-        InitializeErrorReason::DpsProvisioningClient,
-    ))?;
+    assert_eq!(None, provisioning.symmetric_key());
+
+    let dps = match provisioning.symmetric_key() {
+        Some(key) => {
+            DpsSymmetricKeyProvisioning::new(
+                hyper_client,
+                provisioning.global_endpoint().clone(),
+                provisioning.scope_id().to_string(),
+                provisioning.registration_id().to_string(),
+                "2017-11-15".to_string(),
+                key.to_string(),
+            )
+            .context(ErrorKind::Initialize(
+                InitializeErrorReason::DpsProvisioningClient,
+            ))?;
+        },
+        None => {
+            let tpm = Tpm::new().context(ErrorKind::Initialize(
+                InitializeErrorReason::DpsProvisioningClient,
+            ))?;
+            let ek_result = tpm.get_ek().context(ErrorKind::Initialize(
+                InitializeErrorReason::DpsProvisioningClient,
+            ))?;
+            let srk_result = tpm.get_srk().context(ErrorKind::Initialize(
+                InitializeErrorReason::DpsProvisioningClient,
+            ))?;
+            DpsProvisioning::new(
+                hyper_client,
+                provisioning.global_endpoint().clone(),
+                provisioning.scope_id().to_string(),
+                provisioning.registration_id().to_string(),
+                "2017-11-15".to_string(),
+                ek_result,
+                srk_result,
+            )
+            .context(ErrorKind::Initialize(
+                InitializeErrorReason::DpsProvisioningClient,
+            ))?;
+        }
+    };
+
     let tpm_hsm = TpmKeyStore::from_hsm(tpm).context(ErrorKind::Initialize(
         InitializeErrorReason::DpsProvisioningClient,
     ))?;
+
     let provision_with_file_backup = BackupProvisioning::new(dps, backup_path);
     let provision = provision_with_file_backup
         .provision(tpm_hsm.clone())

@@ -19,17 +19,24 @@
 #     manual - using an iothub connection string
 #     dps    - using dps for provisioning
 #
+# DPS Settings
+#     scope_id - Required. Value of a specific DPS instance's ID scope
+#     registration_id - Required. Registration ID of a specific device in DPS
+#     symmetric_key - Optional. Used only when provisioning devices
+#                     configured for symmetric key attestation. When not in use
+#                     ensure that the setting is an empty string.
 ###############################################################################
 
-provisioning:
-  source: "manual"
-  device_connection_string: "<ADD DEVICE CONNECTION STRING HERE>"
-
 # provisioning:
-#   source: "dps"
-#   global_endpoint: "https://global.azure-devices-provisioning.net"
-#   scope_id: "{scope_id}"
-#   registration_id: "{registration_id}"
+#   source: "manual"
+#   device_connection_string: "<ADD DEVICE CONNECTION STRING HERE>"
+
+provisioning:
+  source: "dps"
+  global_endpoint: "https://global.azure-devices-provisioning.net"
+  scope_id: "{scope_id}"
+  registration_id: "{registration_id}"
+  symmetric_key: ""
 
 ###############################################################################
 # Certificate settings

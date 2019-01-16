@@ -15,7 +15,7 @@ use regex::Regex;
 use serde_json;
 use url::Url;
 
-use dps::registration::{DpsClient, DpsTokenSource};
+use dps::registration::{DpsAuthKind, DpsClient, DpsTokenSource};
 use edgelet_core::crypto::{Activate, KeyIdentity, KeyStore, MemoryKey, MemoryKeyStore};
 use edgelet_hsm::tpm::{TpmKey, TpmKeyStore};
 use edgelet_http::client::{Client as HttpClient, ClientImpl};
@@ -222,8 +222,7 @@ where
             self.client.clone(),
             self.scope_id.clone(),
             self.registration_id.clone(),
-            Bytes::from(self.hsm_tpm_ek.as_ref()),
-            Bytes::from(self.hsm_tpm_srk.as_ref()),
+            DpsAuthKind::Tpm(Bytes::from(self.hsm_tpm_ek.as_ref()), Bytes::from(self.hsm_tpm_srk.as_ref())),
             key_activator,
         );
 
@@ -246,6 +245,88 @@ where
             Err(err) => Either::B(future::err(Error::from(err.context(ErrorKind::Provision)))),
         };
 
+        Box::new(d)
+    }
+}
+
+pub struct DpsSymmetricKeyProvisioning<C>
+where
+    C: ClientImpl,
+{
+    client: HttpClient<C, DpsTokenSource<MemoryKey>>,
+    scope_id: String,
+    registration_id: String,
+    symmetric_key: MemoryKey,
+}
+
+impl<C> DpsSymmetricKeyProvisioning<C>
+where
+    C: ClientImpl,
+{
+    pub fn new(
+        client_impl: C,
+        endpoint: Url,
+        scope_id: String,
+        registration_id: String,
+        api_version: String,
+        key: String,
+    ) -> Result<Self, Error> {
+        let client = HttpClient::new(
+            client_impl,
+            None as Option<DpsTokenSource<MemoryKey>>,
+            api_version,
+            endpoint,
+        )
+        .context(ErrorKind::DpsInitialization)?;
+        let symmetric_key = MemoryKey::new(base64::decode(&key).context(
+            ErrorKind::SymmetricKeyMalformed,
+        )?);
+        let result = DpsSymmetricKeyProvisioning {
+            client,
+            scope_id,
+            registration_id,
+            symmetric_key,
+        };
+        Ok(result)
+    }
+}
+
+impl<C> Provision for DpsSymmetricKeyProvisioning<C>
+where
+    C: 'static + ClientImpl,
+{
+    type Hsm = MemoryKeyStore;
+
+    fn provision(
+        self,
+        key_activator: Self::Hsm,
+    ) -> Box<Future<Item = ProvisioningResult, Error = Error> + Send> {
+        let c = DpsClient::new(
+            self.client.clone(),
+            self.scope_id.clone(),
+            self.registration_id.clone(),
+            DpsAuthKind::SymmetricKey(Bytes::from(self.symmetric_key.as_ref())),
+            key_activator,
+        );
+
+        let d = match c {
+            Ok(c) => Either::A(
+                c.register()
+                    .map(|(device_id, hub_name)| {
+                        info!(
+                            "DPS registration assigned device \"{}\" in hub \"{}\"",
+                            device_id, hub_name
+                        );
+                        ProvisioningResult {
+                            device_id,
+                            hub_name,
+                            reconfigure: false,
+                        }
+                    })
+                    .map_err(|err| Error::from(err.context(ErrorKind::Provision))),
+            ),
+            Err(err) => Either::B(future::err(Error::from(err.context(ErrorKind::Provision)))),
+        };
         Box::new(d)
     }
 }
