@@ -121,17 +121,18 @@ where
             let token_duration = Duration::hours(1);
             let expiry = Utc::now() + token_duration;
             let token = source.get(&expiry).context(ErrorKind::TokenSource)?;
-            debug!(
+            info!(
                 "Success generating token for request {} {}",
                 req.method(),
                 path,
             );
+            info!("SAS Token {}", token);
             req.headers_mut().append(
                 http::header::AUTHORIZATION,
                 format!("SharedAccessSignature {}", token).parse().unwrap(),
             );
         } else {
-            debug!("Empty token source for request {} {}", req.method(), path);
+            info!("Empty token source for request {} {}", req.method(), path);
         }
 
         Ok(())
@@ -196,7 +197,7 @@ where
 
                 // add sas token
                 self.add_sas_token(&mut req, path)?;
-
+                info!("Request {:?}", req);
                 Ok(req)
             })
             .map(|req| {

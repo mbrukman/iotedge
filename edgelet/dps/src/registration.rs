@@ -22,7 +22,7 @@ use edgelet_http::ErrorKind as HttpErrorKind;
 use error::{Error, ErrorKind};
 use model::{
     DeviceRegistration, DeviceRegistrationResult, RegistrationOperationStatus, TpmAttestation,
-    TpmRegistrationResult,
+    TpmRegistrationResult, SymmetricKeyRegistrationResult,
 };
 
 /// This is the interval at which to poll DPS for registration assignment status
@@ -128,6 +128,8 @@ where
     }
 
     fn get_tpm_challenge_key(body: &str, key_store: &mut A) -> Result<K, Error> {
+        info!("Body {}", body);
+        assert_eq!("111", body);
         let tpm_challenge: TpmRegistrationResult =
             serde_json::from_str(body).context(ErrorKind::GetTpmChallengeKey)?;
 
@@ -221,12 +223,12 @@ where
     ) -> Result<bool, Error> {
         if let Some(r) = registration_result.as_ref() {
             debug!(
-                "Device Registration Result: device {:?}, hub {:?}, status {}",
+                "Device Registration Result: device {:?}, hub {:?}, status {:?}",
                 r.device_id(),
                 r.assigned_hub(),
                 r.status()
             );
-            Ok(r.status().eq_ignore_ascii_case("assigning"))
+            Ok(r.status().map_or_else(|| false, |status| status.eq_ignore_ascii_case("assigning")))
         } else {
             debug!("Not a device registration response");
             Ok(true)
@@ -279,6 +281,84 @@ where
             },
         );
         Box::new(chain)
+    }
+
+    fn register_with_symmetric_key_auth(
+        client: &Arc<RwLock<Client<C, DpsTokenSource<K>>>>,
+        scope_id: String,
+        registration_id: String,
+        _key: &Bytes,
+        key_store: &A,
+    ) -> Box<Future<Item = Option<RegistrationOperationStatus>, Error = Error> + Send> {
+        let registration = DeviceRegistration::new()
+            .with_registration_id(registration_id.clone());
+        let client_inner = client.clone();
+        let mut key_store_inner = key_store.clone();
+
+        let token_source =
+            DpsTokenSource::new(scope_id.to_string(), registration_id.to_string(), &mut key_store_inner);
+        let r = client
+            .read()
+            .expect("RwLock read failure")
+            .with_token_source(token_source)
+            .request::<DeviceRegistration, SymmetricKeyRegistrationResult>(
+                Method::PUT,
+                &format!("{}/registrations/{}/register", scope_id, registration_id),
+                None,
+                Some(registration.clone()),
+                false,
+            )
+            .then(move |result| {
+                match result {
+                    Ok(_) => Either::B(future::err(Error::from(
+                        ErrorKind::RegisterWithAuthUnexpectedlySucceeded,
+                    ))),
+                    Err(err) => {
+                        // If request is returned with status unauthorized, extract the tpm
+                        // challenge from the payload, generate a signature and re-issue the
+                        // request
+                        let body = if let HttpErrorKind::HttpWithErrorResponse(status, body) =
+                            err.kind()
+                        {
+                            if *status == StatusCode::UNAUTHORIZED {
+                                info!(
+                                    "Registration unauthorized, checking response for challenge {}",
+                                    status,
+                                );
+                                Some(body.clone())
+                            } else {
+                                info!("Unexpected registration status, {}", status);
+                                None
+                            }
+                        } else {
+                            info!("Response error {:?}", err);
+                            None
+                        };
+
+                        body.map_or_else(
+                            || {
+                                Either::B(future::err(Error::from(
+                                    err.context(ErrorKind::RegisterWithAuthUnexpectedlyFailed),
+                                )))
+                            },
+                            move |body| match Self::get_tpm_challenge_key(
+                                body.as_str(),
+                                &mut key_store_inner,
+                            ) {
+                                Ok(key) => Either::A(Self::_get_operation_id(
+                                    &client_inner.clone(),
+                                    scope_id.as_str(),
+                                    registration_id.as_str(),
+                                    &registration,
+                                    key.clone(),
+                                )),
+                                Err(err) => Either::B(future::err(err)),
+                            },
+                        )
+                    }
+                }
+            });
+        Box::new(r)
     }
 
     fn register_with_tpm_auth(
@@ -359,6 +439,36 @@ where
         Box::new(r)
     }
 
+    fn _get_operation_id(
+        client: &Arc<RwLock<Client<C, DpsTokenSource<K>>>>,
+        scope_id: &str,
+        registration_id: &str,
+        registration: &DeviceRegistration,
+        key: K,
+    ) -> Box<Future<Item = Option<RegistrationOperationStatus>, Error = Error> + Send> {
+        let token_source =
+            DpsTokenSource::new(scope_id.to_string(), registration_id.to_string(), key);
+        info!(
+            "Registration PUT, scope_id, \"{}\", registration_id \"{}\"",
+            scope_id, registration_id
+        );
+        assert_eq!("1", registration_id);
+        let f = client
+            .write()
+            .expect("RwLock write failure")
+            .clone()
+            .with_token_source(token_source)
+            .request::<DeviceRegistration, RegistrationOperationStatus>(
+                Method::PUT,
+                &format!("{}/registrations/{}/register", scope_id, registration_id),
+                None,
+                Some(registration.clone()),
+                false,
+            )
+            .map_err(|err| Error::from(err.context(ErrorKind::GetOperationId)));
+        Box::new(f)
+    }
+
     pub fn register(&self) -> Box<Future<Item = (String, String), Error = Error> + Send> {
         let key_store = self.key_store.clone();
         let mut key_store_status = self.key_store.clone();
@@ -384,11 +494,10 @@ where
                         )
             },
             DpsAuthKind::SymmetricKey(key) => {
-                Self::register_with_tpm_auth(
+                Self::register_with_symmetric_key_auth(
                             &self.client,
                             scope_id,
                             registration_id,
-                            &key,
                             &key,
                             &self.key_store,
                         )

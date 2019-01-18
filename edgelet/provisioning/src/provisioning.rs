@@ -301,6 +301,8 @@ where
         self,
         key_activator: Self::Hsm,
     ) -> Box<Future<Item = ProvisioningResult, Error = Error> + Send> {
+
+        info!("Here");
         let c = DpsClient::new(
             self.client.clone(),
             self.scope_id.clone(),
