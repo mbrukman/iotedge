@@ -2,22 +2,26 @@
 namespace Microsoft.Azure.Devices.Edge.Agent.IoTHub
 {
     using System;
+    using System.Net;
     using System.Threading.Tasks;
     using System.Timers;
     using Microsoft.Azure.Devices.Client;
     using Microsoft.Azure.Devices.Edge.Agent.Core;
     using Microsoft.Azure.Devices.Edge.Agent.Core.ConfigSources;
     using Microsoft.Azure.Devices.Edge.Agent.Core.Serde;
+    using Microsoft.Azure.Devices.Edge.Storage;
     using Microsoft.Azure.Devices.Edge.Util;
     using Microsoft.Azure.Devices.Edge.Util.Concurrency;
     using Microsoft.Azure.Devices.Edge.Util.TransientFaultHandling;
     using Microsoft.Azure.Devices.Shared;
     using Microsoft.Extensions.Logging;
+    using Newtonsoft.Json;
     using ExponentialBackoff = Microsoft.Azure.Devices.Edge.Util.TransientFaultHandling.ExponentialBackoff;
 
     public class EdgeAgentConnection : IEdgeAgentConnection
     {
         const string PingMethodName = "ping";
+        const string LogLevelChangeMethodName = "UpdateLogLevel";
         internal static readonly Version ExpectedSchemaVersion = new Version("1.0");
         static readonly TimeSpan DefaultConfigRefreshFrequency = TimeSpan.FromHours(1);
         static readonly Task<MethodResponse> PingMethodResponse = Task.FromResult(new MethodResponse(200));
@@ -129,6 +133,7 @@ namespace Microsoft.Azure.Devices.Edge.Agent.IoTHub
                     {
                         await d.SetDesiredPropertyUpdateCallbackAsync(this.OnDesiredPropertiesUpdated);
                         await d.SetMethodHandlerAsync(PingMethodName, this.PingMethodCallback);
+                        await d.SetMethodHandlerAsync(LogLevelChangeMethodName, this.UpdateLogLevel);
                     });
                 this.deviceClient = Option.Some(dc);
 
@@ -137,6 +142,33 @@ namespace Microsoft.Azure.Devices.Edge.Agent.IoTHub
         }
 
         Task<MethodResponse> PingMethodCallback(MethodRequest methodRequest, object userContext) => PingMethodResponse;
+
+        Task<MethodResponse> UpdateLogLevel(MethodRequest methodRequest, object userContext)
+        {
+            LogLevelUpdateRequest logLevelUpdateRequest;
+            try
+            {
+                logLevelUpdateRequest = methodRequest.Data.FromBytes<LogLevelUpdateRequest>();
+            }
+            catch (Exception e)
+            {
+                Events.ErrorParsingLogLevelUpdateRequest(e);
+                return Task.FromResult(new MethodResponse("Cannot parse log update request".ToBytes(), (int)HttpStatusCode.BadRequest));
+            }
+
+            try
+            {
+                Events.UpdatingLogLevel(logLevelUpdateRequest.LogLevel);
+                Logger.SetLogLevel(logLevelUpdateRequest.LogLevel);
+                Events.UpdatedLogLevel(logLevelUpdateRequest.LogLevel);
+                return Task.FromResult(new MethodResponse((int)HttpStatusCode.OK));
+            }
+            catch (Exception e)
+            {
+                Events.ErrorUpdatingLogLevel(e);
+                return Task.FromResult(new MethodResponse("Error updating log level".ToBytes(), (int)HttpStatusCode.InternalServerError));
+            }
+        }
 
         async void OnConnectionStatusChanged(ConnectionStatus status, ConnectionStatusChangeReason reason)
         {
@@ -268,6 +300,18 @@ namespace Microsoft.Azure.Devices.Edge.Agent.IoTHub
         async Task<bool> WaitForDeviceClientInitialization() =>
             await Task.WhenAny(this.initTask, Task.Delay(DeviceClientInitializationWaitTime)) == this.initTask;
 
+        class LogLevelUpdateRequest
+        {
+            [JsonConstructor]
+            public LogLevelUpdateRequest(string logLevel)
+            {
+                this.LogLevel = Preconditions.CheckNonWhiteSpace(logLevel, nameof(logLevel));
+            }
+
+            [JsonProperty("logLevel")]
+            public string LogLevel { get; }
+        }
+
         static class Events
         {
             const int IdStart = AgentEventIds.EdgeAgentConnection;
@@ -288,7 +332,10 @@ namespace Microsoft.Azure.Devices.Edge.Agent.IoTHub
                 RetryingGetTwin,
                 MismatchedSchemaVersion,
                 TwinRefreshInit,
-                TwinRefreshStart
+                TwinRefreshStart,
+                ErrorUpdatingLogLevel,
+                UpdatedLogLevel,
+                UpdatingLogLevel
             }
 
             public static void DesiredPropertiesPatchFailed(Exception exception)
@@ -361,6 +408,26 @@ namespace Microsoft.Azure.Devices.Edge.Agent.IoTHub
             internal static void RetryingGetTwin(RetryingEventArgs args)
             {
                 Log.LogDebug((int)EventIds.RetryingGetTwin, $"Edge agent is retrying GetTwinAsync. Attempt #{args.CurrentRetryCount}. Last error: {args.LastException?.Message}");
+            }
+
+            public static void ErrorParsingLogLevelUpdateRequest(Exception ex)
+            {
+                Log.LogWarning((int)EventIds.ErrorParsingLogLevelUpdateRequest, ex, "Error parsing log level update request");
+            }
+
+            public static void UpdatingLogLevel(string logLevel)
+            {
+                Log.LogInformation((int)EventIds.UpdatingLogLevel, $"Updating log level to {logLevel}");
+            }
+
+            public static void UpdatedLogLevel(string logLevel)
+            {
+                Log.LogDebug((int)EventIds.UpdatedLogLevel, $"Updated log level to {logLevel}");
+            }
+
+            public static void ErrorUpdatingLogLevel(Exception ex)
+            {
+                Log.LogWarning((int)EventIds.ErrorUpdatingLogLevel, ex, "Error updating log level");
             }
         }
     }
